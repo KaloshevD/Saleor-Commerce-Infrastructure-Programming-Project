@@ -1,7 +1,7 @@
 # E-Commerce Platform with Ansible
 
 One command turns a set of fresh Ubuntu servers into a working online shop.
-The project (course: IT Systems Administration, FINKI) automates a multi-tier
+The project (course: Infrastructure Programming, FINKI) automates a multi-tier
 **Saleor** e-commerce platform: database, backend, frontend, cache and a load balancer.
 
 ---
