@@ -1,0 +1,57 @@
+---
+# One command from clean Ubuntu 24.04 hosts to a working system:
+#   ansible-playbook site.yml -i inventory/staging
+- name: Base preparation (all hosts)
+  hosts: ecommerce
+  become: true
+  tasks:
+    - name: Install base packages
+      ansible.builtin.apt:
+        name: [acl, curl, ca-certificates, gnupg, python3-apt]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+- name: Cache tier (Redis)
+  hosts: cache
+  become: true
+  roles:
+    - geerlingguy.redis
+
+- name: Database tier - primary
+  hosts: db_primary
+  become: true
+  roles:
+    - geerlingguy.postgresql
+    - db-replication
+
+- name: Database tier - replica
+  hosts: db_replica
+  become: true
+  roles:
+    - geerlingguy.postgresql
+    - db-replication
+
+- name: Backend tier (Django + Gunicorn + Celery)
+  hosts: app
+  become: true
+  roles:
+    - geerlingguy.pip
+    - django-app
+
+- name: Frontend tier (React build + Nginx)
+  hosts: web
+  become: true
+  roles:
+    - geerlingguy.nodejs
+    - geerlingguy.nginx
+    - frontend-deploy
+
+- name: Load balancer tier (Nginx + TLS)
+  hosts: lb
+  become: true
+  roles:
+    - geerlingguy.nginx
+    - role: geerlingguy.certbot
+      when: lb_ssl_mode | default('selfsigned') == 'letsencrypt'
+    - lb-config

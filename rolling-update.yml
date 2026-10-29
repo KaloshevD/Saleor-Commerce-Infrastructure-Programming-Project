@@ -1,0 +1,112 @@
+---
+# Rolling update, one node at a time, with LB drain + health check + automatic rollback.
+#   ansible-playbook rolling-update.yml -i inventory/production -e rollout_version=3.21
+# (rollout_version = git branch/tag/commit of the backend; add -e frontend_version=... for the web tier)
+
+- name: Rolling update - backend tier
+  hosts: app
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  pre_tasks:
+    - name: rollout_version must be given
+      ansible.builtin.assert:
+        that: rollout_version is defined
+        fail_msg: "Pass the version with -e rollout_version=<tag|branch|commit>"
+      run_once: true
+
+    - name: Remember the currently deployed commit (for rollback)
+      ansible.builtin.command: git -C {{ app_dir }}/src rev-parse HEAD
+      become: true
+      become_user: "{{ app_user }}"
+      register: app_prev
+      changed_when: false
+
+  tasks:
+    - name: Update with rollback on failure
+      block:
+        - name: Drain this node from every load balancer (delegate_to the LBs)
+          ansible.builtin.include_role:
+            name: lb-config
+            tasks_from: backend_state.yml
+          vars:
+            lb_target_host: "{{ inventory_hostname }}"
+            lb_target_state: drained
+          loop: "{{ groups['lb'] }}"
+          loop_control:
+            loop_var: lb_node
+
+        - name: Let in-flight requests finish
+          ansible.builtin.pause:
+            seconds: 5
+
+        - name: Deploy new version (role includes migrate + health check)
+          ansible.builtin.include_role:
+            name: django-app
+          vars:
+            app_version: "{{ rollout_version }}"
+
+        - name: Put node back into rotation
+          ansible.builtin.include_role:
+            name: lb-config
+            tasks_from: backend_state.yml
+          vars:
+            lb_target_host: "{{ inventory_hostname }}"
+            lb_target_state: active
+          loop: "{{ groups['lb'] }}"
+          loop_control:
+            loop_var: lb_node
+
+      rescue:
+        - name: ROLLBACK - redeploy previous commit
+          ansible.builtin.include_role:
+            name: django-app
+          vars:
+            app_version: "{{ app_prev.stdout }}"
+
+        - name: ROLLBACK - put node back into rotation
+          ansible.builtin.include_role:
+            name: lb-config
+            tasks_from: backend_state.yml
+          vars:
+            lb_target_host: "{{ inventory_hostname }}"
+            lb_target_state: active
+          loop: "{{ groups['lb'] }}"
+          loop_control:
+            loop_var: lb_node
+
+        - name: Stop the rollout
+          ansible.builtin.fail:
+            msg: "Update failed on {{ inventory_hostname }}; rolled back to {{ app_prev.stdout }}. DB migrations are NOT reverted."
+
+- name: Rolling update - frontend tier (optional, run when the frontend changed)
+  hosts: web
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  tasks:
+    - name: Drain web node from the load balancers
+      ansible.builtin.include_role:
+        name: lb-config
+        tasks_from: backend_state.yml
+      vars:
+        lb_target_host: "{{ inventory_hostname }}"
+        lb_target_state: drained
+      loop: "{{ groups['lb'] }}"
+      loop_control:
+        loop_var: lb_node
+
+    - name: Rebuild and publish frontend
+      ansible.builtin.include_role:
+        name: frontend-deploy
+
+    - name: Re-enable web node
+      ansible.builtin.include_role:
+        name: lb-config
+        tasks_from: backend_state.yml
+      vars:
+        lb_target_host: "{{ inventory_hostname }}"
+        lb_target_state: active
+      loop: "{{ groups['lb'] }}"
+      loop_control:
+        loop_var: lb_node

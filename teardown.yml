@@ -1,0 +1,77 @@
+---
+# Puts the target VMs back to a "nearly clean" state so site.yml can be demonstrated from scratch.
+# Faster and cleaner alternative: restore the VM snapshots you took before the first deploy.
+#
+#   ansible-playbook teardown.yml -i inventory/staging 
+#
+# It removes everything this project installed (apps, databases, web servers, Redis, Node.js).
+# It never touches the control node.
+- name: Reset target VMs (DESTRUCTIVE)
+  hosts: ecommerce
+  become: true
+  tasks:
+    - name: Stop and disable services (ignore the ones that do not exist)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: [saleor-gunicorn, saleor-celery, nginx, redis-server, postgresql]
+      failed_when: false
+
+    # apt-get aborts the WHOLE purge if any glob matches nothing, so purge only what is installed.
+    - name: Find installed packages that belong to this project
+      ansible.builtin.shell: >
+        dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'postgresql*' 'redis*' 'nginx*' nodejs 2>/dev/null
+        | awk '$1 ~ /^(ii|rc|iU|iF|hi|iH)$/ {print $2}' || true
+      register: pkgs_installed
+      changed_when: false
+
+    - name: Purge those packages
+      ansible.builtin.command: >
+        apt-get purge -y -o DPkg::Lock::Timeout=180 {{ pkgs_installed.stdout_lines | join(' ') }}
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: pkgs_installed.stdout_lines | length > 0
+
+    - name: Remove packages that are no longer needed
+      ansible.builtin.command: apt-get autoremove -y -o DPkg::Lock::Timeout=180
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      changed_when: false
+
+    - name: Check that nothing from the project is still installed
+      ansible.builtin.shell: >
+        dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'postgresql*' 'redis*' 'nginx*' nodejs 2>/dev/null
+        | awk '$1 ~ /^(ii|rc|iU|iF|hi|iH)$/ {print $2}' || true
+      register: pkgs_left
+      changed_when: false
+      failed_when: pkgs_left.stdout_lines | length > 0
+
+    - name: Remove application files, data and configuration
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/saleor
+        - /opt/frontend-src
+        - /var/www/frontend
+        - /etc/postgresql
+        - /var/lib/postgresql
+        - /etc/nginx
+        - /etc/redis
+        - /var/lib/redis
+        - /usr/lib/node_modules
+        - /etc/apt/sources.list.d/nodesource.list
+        - /etc/apt/sources.list.d/nodesource.sources
+        - /etc/systemd/system/saleor-gunicorn.service
+        - /etc/systemd/system/saleor-celery.service
+
+    - name: Remove the application user
+      ansible.builtin.user:
+        name: saleor
+        state: absent
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+

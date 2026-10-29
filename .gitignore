@@ -1,0 +1,11 @@
+galaxy_collections/
+galaxy_roles/
+.generated/
+id_ed25519*
+*.key
+*.pem
+*.retry
+sshpass*
+.vagrant/
+.vault_pass
+.vault_pass*
